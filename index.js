@@ -2,6 +2,14 @@ import http from 'node:http';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import {
+  AudioPlayerStatus,
+  createAudioPlayer,
+  createAudioResource,
+  joinVoiceChannel,
+  StreamType,
+  VoiceConnectionStatus
+} from '@discordjs/voice';
+import {
   ActionRowBuilder,
   ApplicationCommandType,
   ButtonBuilder,
@@ -15,6 +23,8 @@ import {
   Routes,
   SlashCommandBuilder
 } from 'discord.js';
+import ytdl from 'ytdl-core';
+import https from 'node:https';
 
 const server = http.createServer((req, res) => {
   res.writeHead(200, { 'Content-Type': 'text/plain' });
@@ -52,6 +62,7 @@ const client = new Client({
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMembers,
     GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.GuildMessageReactions,
     GatewayIntentBits.MessageContent
   ]
 });
@@ -66,10 +77,12 @@ function createDefaultGuildState() {
     modLogChannelId: null,
     ticketChannelId: null,
     announcementsChannelId: null,
-    autoMod: { antiLink: true, antiInvite: true, antiSpam: true, antiMentions: true },
+    autoMod: { antiLink: true, antiInvite: true, antiSpam: true, antiMentions: true, antiCaps: true, blockedWords: [] },
     blacklist: [],
     shop: [{ name: 'XP Booster', price: 1000, description: 'Boost your next XP gain' }],
-    suggestions: []
+    suggestions: [],
+    reactionRoles: [],
+    logging: { channelId: null }
   };
 }
 
@@ -180,12 +193,160 @@ function getPrefix(guildId) {
   return getGuildState(guildId).prefix || '>';
 }
 
+function escapeRegExp(text) {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function getReactionKey(emoji) {
+  if (!emoji) return null;
+  if (typeof emoji === 'string' && emoji.startsWith('<') && emoji.includes(':')) return emoji;
+  return emoji.name || emoji.toString();
+}
+
+async function sendLog(guildId, embed) {
+  const guildState = getGuildState(guildId);
+  const channelId = guildState.logging?.channelId;
+  if (!channelId) return;
+  const channel = client.channels.cache.get(channelId);
+  if (channel?.isTextBased()) {
+    await channel.send({ embeds: [embed] }).catch(() => null);
+  }
+}
+
+function parseDuration(value) {
+  const match = /^([0-9]+)([smhd])$/i.exec(value.trim());
+  if (!match) return null;
+  const amount = Number.parseInt(match[1], 10);
+  const unit = match[2].toLowerCase();
+  const multipliers = { s: 1000, m: 60 * 1000, h: 60 * 60 * 1000, d: 24 * 60 * 60 * 1000 };
+  return amount * multipliers[unit];
+}
+
 function canModerate(member) {
   if (!member) return false;
   return member.permissions.has(PermissionFlagsBits.Administrator)
     || member.permissions.has(PermissionFlagsBits.ManageGuild)
     || member.permissions.has(PermissionFlagsBits.ManageMessages)
     || member.permissions.has(PermissionFlagsBits.ModerateMembers);
+}
+
+function getMusicState(guildId) {
+  if (!musicStates.has(guildId)) {
+    musicStates.set(guildId, { queue: [], connection: null, player: null, textChannel: null, current: null });
+  }
+  return musicStates.get(guildId);
+}
+
+async function stopMusic(guildId) {
+  const state = getMusicState(guildId);
+  state.queue = [];
+  state.current = null;
+  if (state.player) {
+    state.player.stop();
+  }
+  if (state.connection) {
+    state.connection.destroy();
+  }
+  state.connection = null;
+  state.player = null;
+  state.textChannel = null;
+  musicStates.delete(guildId);
+}
+
+function fetchSpotifyTrack(url) {
+  return new Promise((resolve, reject) => {
+    const request = https.get(url, { headers: { 'User-Agent': 'Mozilla/5.0' } }, (response) => {
+      let data = '';
+      response.on('data', (chunk) => { data += chunk; });
+      response.on('end', () => {
+        if (response.statusCode && response.statusCode >= 400) {
+          reject(new Error(`HTTP ${response.statusCode}`));
+          return;
+        }
+        resolve(data);
+      });
+    });
+    request.on('error', reject);
+  });
+}
+
+async function resolveTrackInfo(input) {
+  if (/^(https?:\/\/)/i.test(input)) {
+    if (/spotify\.com/i.test(input)) {
+      const html = await fetchSpotifyTrack(input);
+      const titleMatch = html.match(/<title[^>]*>([^<]+)<\/title>/i);
+      const title = titleMatch ? titleMatch[1].replace(/Spotify/i, '').trim() : 'Spotify track';
+      return { url: input, title: title || 'Spotify track' };
+    }
+
+    const info = await ytdl.getInfo(input);
+    return { url: input, title: info.videoDetails.title };
+  }
+
+  return { url: input, title: input };
+}
+
+async function playNextTrack(guildId) {
+  const state = getMusicState(guildId);
+  if (!state.queue.length) {
+    await stopMusic(guildId);
+    return;
+  }
+
+  if (!state.connection) return;
+  if (!state.player) {
+    state.player = createAudioPlayer();
+    state.player.on('error', (error) => {
+      console.error('Music player error:', error);
+      playNextTrack(guildId).catch(() => null);
+    });
+    state.player.on(AudioPlayerStatus.Idle, () => {
+      if (state.queue.length) {
+        playNextTrack(guildId).catch(() => null);
+      } else {
+        setTimeout(() => {
+          if (state.player?.state.status === AudioPlayerStatus.Idle) {
+            stopMusic(guildId).catch(() => null);
+          }
+        }, 5000);
+      }
+    });
+  }
+
+  const track = state.queue.shift();
+  state.current = track;
+  try {
+    const stream = ytdl(track.url, { filter: 'audioonly', quality: 'highestaudio', highWaterMark: 1 << 25 });
+    const resource = createAudioResource(stream, { inputType: StreamType.Arbitrary });
+    state.player.play(resource);
+    state.connection.subscribe(state.player);
+    if (state.textChannel) {
+      await state.textChannel.send(`🎵 Now playing: **${track.title}**`).catch(() => null);
+    }
+  } catch (error) {
+    console.error('Failed to play track:', error);
+    if (state.queue.length) {
+      await playNextTrack(guildId);
+    } else {
+      await stopMusic(guildId);
+    }
+  }
+}
+
+async function ensureVoiceConnection(guildId, voiceChannel, textChannel) {
+  const state = getMusicState(guildId);
+  if (!state.connection || state.connection.state.status === VoiceConnectionStatus.Destroyed) {
+    state.connection = joinVoiceChannel({
+      channelId: voiceChannel.id,
+      guildId: voiceChannel.guild.id,
+      adapterCreator: voiceChannel.guild.voiceAdapterCreator
+    });
+    state.connection.on(VoiceConnectionStatus.Disconnected, () => {
+      stopMusic(guildId).catch(() => null);
+    });
+  }
+  state.textChannel = textChannel;
+  return state;
 }
 
 function isBlacklisted(userId, guildId) {
@@ -224,7 +385,55 @@ function formatDuration(ms) {
   return `${hours}h ${minutes % 60}m`;
 }
 
+function buildHelpEmbed(prefix, category = 'all') {
+  const base = new EmbedBuilder()
+    .setColor('#5865F2')
+    .setTitle('🤖 Mega Bot Help')
+    .setDescription(`Prefix: ${prefix}\nFeatures: moderation, economy, leveling, welcome, tickets, self-roles, suggestions, fun, announcements, auto-mod, reaction roles, logging, music`);
+
+  switch (category) {
+    case 'utility':
+      return base.addFields({ name: 'Utility', value: 'ping, help, avatar, userinfo, serverinfo' });
+    case 'moderation':
+      return base.addFields({ name: 'Moderation', value: 'kick, ban, tempban, softban, warn, unwarn, warnings, mute, unmute, purge, slowmode, nick, lock, unlock' });
+    case 'economy':
+      return base.addFields({ name: 'Economy & Fun', value: 'balance, daily, weekly, monthly, work, crime, beg, deposit, withdraw, transfer, shop, buy, inventory, coinflip, dice, rps, 8ball' });
+    case 'setup':
+      return base.addFields({ name: 'Setup', value: 'setup-welcome, setup-leave, set-auto-role, setup-selfrole, setup-tickets, prefix, setlogchannel, addblockword, removeblockword, setup-reactionrole, setlang, backup, restore, announce, suggest, poll, remind, streamremind' });
+    case 'music':
+      return base.addFields({ name: 'Music', value: 'play, queue, skip, pause, resume, stop' });
+    default:
+      return base.addFields(
+        { name: 'Utility', value: 'ping, help, avatar, userinfo, serverinfo' },
+        { name: 'Moderation', value: 'kick, ban, tempban, softban, warn, unwarn, warnings, mute, unmute, purge, slowmode, nick, lock, unlock' },
+        { name: 'Economy & Fun', value: 'balance, daily, weekly, monthly, work, crime, beg, deposit, withdraw, transfer, shop, buy, inventory, coinflip, dice, rps, 8ball' },
+        { name: 'Setup', value: 'setup-welcome, setup-leave, set-auto-role, setup-selfrole, setup-tickets, prefix, setlogchannel, addblockword, removeblockword, setup-reactionrole, setlang, backup, restore, announce, suggest, poll, remind, streamremind' },
+        { name: 'Music', value: 'play, queue, skip, pause, resume, stop' }
+      );
+  }
+}
+
+function buildHelpComponents(selectedCategory = 'all') {
+  const categories = [
+    { id: 'all', label: 'All', style: ButtonStyle.Primary },
+    { id: 'utility', label: 'Utility', style: ButtonStyle.Secondary },
+    { id: 'moderation', label: 'Moderation', style: ButtonStyle.Secondary },
+    { id: 'economy', label: 'Economy', style: ButtonStyle.Secondary },
+    { id: 'setup', label: 'Setup', style: ButtonStyle.Secondary },
+    { id: 'music', label: 'Music', style: ButtonStyle.Secondary }
+  ];
+
+  return [new ActionRowBuilder().addComponents(
+    ...categories.map((category) => new ButtonBuilder()
+      .setCustomId(`help:${category.id}`)
+      .setLabel(category.label)
+      .setStyle(selectedCategory === category.id ? ButtonStyle.Success : category.style))
+  )];
+}
+
 const cooldowns = new Map();
+const reminders = new Map();
+const musicStates = new Map();
 const aliases = {
   pong: 'ping',
   commands: 'help',
@@ -285,6 +494,19 @@ const slashCommands = [
   new SlashCommandBuilder().setName('setup-selfrole').setDescription('Create a self-role button').addRoleOption((opt) => opt.setName('role').setDescription('The role to toggle').setRequired(true)).addStringOption((opt) => opt.setName('label').setDescription('Button label').setRequired(true)).setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
   new SlashCommandBuilder().setName('setup-tickets').setDescription('Deploy a ticket support panel').setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
   new SlashCommandBuilder().setName('prefix').setDescription('Set a custom prefix for this server').addStringOption((opt) => opt.setName('value').setDescription('The new prefix').setRequired(true)).setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+  new SlashCommandBuilder().setName('setlogchannel').setDescription('Set the logging channel').addChannelOption((opt) => opt.setName('channel').setDescription('Channel for bot logs').setRequired(true)).setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+  new SlashCommandBuilder().setName('poll').setDescription('Create a simple poll').addStringOption((opt) => opt.setName('question').setDescription('Poll question').setRequired(true)).addStringOption((opt) => opt.setName('options').setDescription('Comma-separated options').setRequired(true)).setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+  new SlashCommandBuilder().setName('remind').setDescription('Set a reminder').addStringOption((opt) => opt.setName('time').setDescription('Time like 10m, 1h, or 2d').setRequired(true)).addStringOption((opt) => opt.setName('message').setDescription('Reminder text').setRequired(true)).setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+  new SlashCommandBuilder().setName('play').setDescription('Play a YouTube track').addStringOption((opt) => opt.setName('url').setDescription('YouTube URL').setRequired(true)),
+  new SlashCommandBuilder().setName('queue').setDescription('Show the music queue'),
+  new SlashCommandBuilder().setName('skip').setDescription('Skip the current track'),
+  new SlashCommandBuilder().setName('pause').setDescription('Pause the current track'),
+  new SlashCommandBuilder().setName('resume').setDescription('Resume the current track'),
+  new SlashCommandBuilder().setName('stop').setDescription('Stop the music player'),
+  new SlashCommandBuilder().setName('streamremind').setDescription('Remind you about a YouTube or Twitch stream').addStringOption((opt) => opt.setName('platform').setDescription('youtube or twitch').setRequired(true)).addStringOption((opt) => opt.setName('name').setDescription('Channel or streamer name').setRequired(true)).addStringOption((opt) => opt.setName('time').setDescription('Time like 10m, 1h, or 2d').setRequired(true)).setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+  new SlashCommandBuilder().setName('addblockword').setDescription('Add a blocked word').addStringOption((opt) => opt.setName('word').setDescription('Word to block').setRequired(true)).setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+  new SlashCommandBuilder().setName('removeblockword').setDescription('Remove a blocked word').addStringOption((opt) => opt.setName('word').setDescription('Word to remove').setRequired(true)).setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+  new SlashCommandBuilder().setName('setup-reactionrole').setDescription('Create a reaction-role message').addRoleOption((opt) => opt.setName('role').setDescription('Role to assign').setRequired(true)).addStringOption((opt) => opt.setName('emoji').setDescription('Reaction emoji').setRequired(true)).addStringOption((opt) => opt.setName('label').setDescription('Text shown with the role panel')).setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
   new SlashCommandBuilder().setName('setlang').setDescription('Set the server language').addStringOption((opt) => opt.setName('language').setDescription('Language code like en or fr').setRequired(true)).setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
   new SlashCommandBuilder().setName('backup').setDescription('Create a data backup').setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
   new SlashCommandBuilder().setName('restore').setDescription('Restore the latest backup').setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
@@ -324,6 +546,8 @@ client.on('guildMemberAdd', async (member) => {
     const message = (guildState.welcome.message || 'Welcome {user} to {server}!').replace('{user}', member.user.tag).replace('{server}', member.guild.name);
     await welcomeChannel.send(message);
   }
+
+  await sendLog(member.guild.id, new EmbedBuilder().setColor('#57F287').setTitle('👋 Member Joined').setDescription(`${member.user.tag} joined the server.`));
 });
 
 client.on('guildMemberRemove', async (member) => {
@@ -333,6 +557,45 @@ client.on('guildMemberRemove', async (member) => {
     const message = (guildState.leave.message || 'Goodbye {user}!').replace('{user}', member.user.tag).replace('{server}', member.guild.name);
     await leaveChannel.send(message);
   }
+
+  await sendLog(member.guild.id, new EmbedBuilder().setColor('#FEE75C').setTitle('👋 Member Left').setDescription(`${member.user.tag} left the server.`));
+});
+
+client.on('guildBanAdd', async (ban) => {
+  await sendLog(ban.guild.id, new EmbedBuilder().setColor('#ED4245').setTitle('🔨 Member Banned').setDescription(`${ban.user.tag} was banned.`).setTimestamp());
+});
+
+client.on('guildBanRemove', async (ban) => {
+  await sendLog(ban.guild.id, new EmbedBuilder().setColor('#57F287').setTitle('✅ Member Unbanned').setDescription(`${ban.user.tag} was unbanned.`).setTimestamp());
+});
+
+client.on('messageDelete', async (message) => {
+  if (!message.guild || message.author?.bot) return;
+  await sendLog(message.guild.id, new EmbedBuilder().setColor('#FEE75C').setTitle('🗑️ Message Deleted').setDescription(`A message by ${message.author.tag} was deleted.\n\n${message.content || 'No content'}`).setTimestamp());
+});
+
+client.on('messageReactionAdd', async (reaction, user) => {
+  if (user.bot || !reaction.message.guild) return;
+  const guildState = getGuildState(reaction.message.guild.id);
+  const match = guildState.reactionRoles.find((entry) => entry.messageId === reaction.message.id && entry.channelId === reaction.message.channel.id);
+  if (!match) return;
+  const emojiKey = getReactionKey(reaction.emoji);
+  if (!emojiKey || emojiKey !== match.emoji) return;
+  const member = await reaction.message.guild.members.fetch(user.id).catch(() => null);
+  const role = reaction.message.guild.roles.cache.get(match.roleId);
+  if (member && role) await member.roles.add(role).catch(() => null);
+});
+
+client.on('messageReactionRemove', async (reaction, user) => {
+  if (user.bot || !reaction.message.guild) return;
+  const guildState = getGuildState(reaction.message.guild.id);
+  const match = guildState.reactionRoles.find((entry) => entry.messageId === reaction.message.id && entry.channelId === reaction.message.channel.id);
+  if (!match) return;
+  const emojiKey = getReactionKey(reaction.emoji);
+  if (!emojiKey || emojiKey !== match.emoji) return;
+  const member = await reaction.message.guild.members.fetch(user.id).catch(() => null);
+  const role = reaction.message.guild.roles.cache.get(match.roleId);
+  if (member && role) await member.roles.remove(role).catch(() => null);
 });
 
 client.on('messageCreate', async (message) => {
@@ -342,8 +605,26 @@ client.on('messageCreate', async (message) => {
   if (isBlacklisted(message.author.id, message.guild.id)) return;
 
   const content = message.content;
+  const isModerator = message.member?.permissions.has(PermissionFlagsBits.Administrator)
+    || message.member?.permissions.has(PermissionFlagsBits.ManageGuild)
+    || message.member?.permissions.has(PermissionFlagsBits.ManageMessages);
+
+  const blockedWords = guildState.autoMod.blockedWords || [];
+  const matchedBlockedWord = blockedWords.find((word) => new RegExp(`\\b${escapeRegExp(word)}\\b`, 'i').test(content));
+  if (matchedBlockedWord && !isModerator) {
+    await message.delete().catch(() => null);
+    return;
+  }
+
+  const letters = (content.match(/[A-Za-z]/g) || []).length;
+  const uppercaseLetters = (content.match(/[A-Z]/g) || []).length;
+  if (guildState.autoMod.antiCaps && letters >= 12 && uppercaseLetters / letters > 0.7 && !isModerator) {
+    await message.delete().catch(() => null);
+    return;
+  }
+
   if (content.includes('http://') || content.includes('https://') || content.includes('discord.gg/')) {
-    if (!guildState.autoMod.antiLink || message.member?.permissions.has(PermissionFlagsBits.Administrator)) return;
+    if (!guildState.autoMod.antiLink || isModerator) return;
     try {
       await message.delete();
       const warning = await message.channel.send(`⚠️ ${message.author}, links are not allowed here.`);
@@ -352,21 +633,21 @@ client.on('messageCreate', async (message) => {
   }
 
   if (guildState.autoMod.antiInvite && /(discord\.gg|discordapp\.com\/invite|discord\.com\/invite)/i.test(content)) {
-    if (!message.member?.permissions.has(PermissionFlagsBits.Administrator)) {
+    if (!isModerator) {
       await message.delete().catch(() => null);
       return;
     }
   }
 
   if (guildState.autoMod.antiMentions && message.mentions.users.size > 3) {
-    if (!message.member?.permissions.has(PermissionFlagsBits.Administrator)) {
+    if (!isModerator) {
       await message.delete().catch(() => null);
       return;
     }
   }
 
   if (guildState.autoMod.antiSpam && content.split(/\s+/).length > 14) {
-    if (!message.member?.permissions.has(PermissionFlagsBits.Administrator)) {
+    if (!isModerator) {
       await message.delete().catch(() => null);
       return;
     }
@@ -402,12 +683,12 @@ client.on('messageCreate', async (message) => {
         const embed = new EmbedBuilder()
           .setColor('#5865F2')
           .setTitle('🤖 Mega Bot Help')
-          .setDescription(`Prefix: ${prefix}\nFeatures: moderation, economy, leveling, welcome, tickets, self-roles, suggestions, fun, announcements`)
+          .setDescription(`Prefix: ${prefix}\nFeatures: moderation, economy, leveling, welcome, tickets, self-roles, suggestions, fun, announcements, auto-mod, reaction roles, logging`)
           .addFields(
             { name: 'Utility', value: 'ping, help, avatar, userinfo, serverinfo' },
             { name: 'Moderation', value: 'kick, ban, tempban, softban, warn, unwarn, warnings, mute, unmute, purge, slowmode, nick, lock, unlock' },
             { name: 'Economy & Fun', value: 'balance, daily, weekly, monthly, work, crime, beg, deposit, withdraw, transfer, shop, buy, inventory, coinflip, dice, rps, 8ball' },
-            { name: 'Setup', value: 'setup-welcome, setup-leave, set-auto-role, setup-selfrole, setup-tickets, prefix, setlang, backup, restore, announce, suggest' }
+            { name: 'Setup', value: 'setup-welcome, setup-leave, set-auto-role, setup-selfrole, setup-tickets, prefix, setlogchannel, addblockword, removeblockword, setup-reactionrole, setlang, backup, restore, announce, suggest' }
           );
         await message.reply({ embeds: [embed] });
         break;
@@ -782,6 +1063,137 @@ client.on('messageCreate', async (message) => {
         await message.channel.send({ embeds: [embed], components: [row] });
         break;
       }
+      case 'setlogchannel': {
+        const channel = message.mentions.channels.first() || message.guild.channels.cache.get(args[0]) || message.guild.channels.cache.find((entry) => entry.name.toLowerCase() === (args[0] || '').toLowerCase());
+        if (!channel?.isTextBased()) return message.reply('⚠️ Please mention or provide a valid text channel.');
+        getGuildState(message.guild.id).logging.channelId = channel.id;
+        saveState();
+        await message.reply(`✅ Logging channel set to ${channel}.`);
+        break;
+      }
+      case 'poll': {
+        const question = args[0];
+        const options = args.slice(1).join(' ').split(',').map((entry) => entry.trim()).filter(Boolean);
+        if (!question || options.length < 2) return message.reply('⚠️ Use >poll "Question" "Option1,Option2,Option3"');
+        const pollMessage = await message.channel.send({ embeds: [new EmbedBuilder().setColor('#5865F2').setTitle('📊 Poll').setDescription(question).addFields(options.map((option, index) => ({ name: `${index + 1}. ${option}`, value: '⬜', inline: false }))) ] });
+        const emojiList = ['1️⃣', '2️⃣', '3️⃣', '4️⃣', '5️⃣', '6️⃣', '7️⃣', '8️⃣', '9️⃣'];
+        for (let index = 0; index < Math.min(options.length, emojiList.length); index += 1) {
+          await pollMessage.react(emojiList[index]).catch(() => null);
+        }
+        await message.reply('✅ Poll created.');
+        break;
+      }
+      case 'remind': {
+        const duration = parseDuration(args[0]);
+        const reminderText = args.slice(1).join(' ');
+        if (!duration || !reminderText) return message.reply('⚠️ Use >remind 10m message');
+        const timeoutId = setTimeout(async () => {
+          try {
+            await message.author.send(`⏰ Reminder: ${reminderText}`);
+          } catch {}
+          reminders.delete(timeoutId);
+        }, duration);
+        reminders.set(timeoutId, { userId: message.author.id, createdAt: Date.now() });
+        await message.reply(`✅ Reminder set for ${args[0]}.`);
+        break;
+      }
+      case 'streamremind': {
+        const platform = (args[0] || '').toLowerCase();
+        const name = args[1];
+        const duration = parseDuration(args[2]);
+        if (!['youtube', 'twitch'].includes(platform) || !name || !duration) return message.reply('⚠️ Use >streamremind youtube|twitch name 10m');
+        const timeoutId = setTimeout(async () => {
+          try {
+            await message.author.send(`📺 Reminder: ${name} on ${platform} is starting soon.`);
+          } catch {}
+          reminders.delete(timeoutId);
+        }, duration);
+        reminders.set(timeoutId, { userId: message.author.id, createdAt: Date.now(), platform, name });
+        await message.reply(`✅ Stream reminder set for ${name} on ${platform}.`);
+        break;
+      }
+      case 'addblockword': {
+        const word = args[0];
+        if (!word) return message.reply('⚠️ Please provide a word to block.');
+        const guildState = getGuildState(message.guild.id);
+        guildState.autoMod.blockedWords = Array.from(new Set([...(guildState.autoMod.blockedWords || []), word.toLowerCase()]));
+        saveState();
+        await message.reply(`✅ Added **${word}** to the blocked words list.`);
+        break;
+      }
+      case 'removeblockword': {
+        const word = args[0];
+        if (!word) return message.reply('⚠️ Please provide a word to remove.');
+        const guildState = getGuildState(message.guild.id);
+        guildState.autoMod.blockedWords = (guildState.autoMod.blockedWords || []).filter((entry) => entry.toLowerCase() !== word.toLowerCase());
+        saveState();
+        await message.reply(`✅ Removed **${word}** from the blocked words list.`);
+        break;
+      }
+      case 'setup-reactionrole': {
+        const role = message.mentions.roles.first() || message.guild.roles.cache.get(args[0]) || message.guild.roles.cache.find((entry) => entry.name.toLowerCase() === (args[0] || '').toLowerCase());
+        const emoji = args[1];
+        const label = args.slice(2).join(' ') || role?.name || 'Claim role';
+        if (!role || !emoji) return message.reply('⚠️ Use >setup-reactionrole @role emoji label');
+        const panelMessage = await message.channel.send({ content: `${label}\nReact with ${emoji} to get **${role.name}**.` });
+        await panelMessage.react(emoji).catch(() => null);
+        getGuildState(message.guild.id).reactionRoles.push({ messageId: panelMessage.id, channelId: panelMessage.channel.id, roleId: role.id, emoji: getReactionKey(emoji) });
+        saveState();
+        await message.reply('✅ Reaction-role panel created.');
+        break;
+      }
+      case 'play': {
+        const trackUrl = args[0];
+        if (!trackUrl) return message.reply('⚠️ Use >play <youtube-url-or-spotify-url>');
+        if (!message.member?.voice?.channel) return message.reply('⚠️ Join a voice channel first.');
+        try {
+          const track = await resolveTrackInfo(trackUrl);
+          const state = await ensureVoiceConnection(message.guild.id, message.member.voice.channel, message.channel);
+          state.queue.push(track);
+          if (!state.player || state.player.state.status === AudioPlayerStatus.Idle) {
+            await playNextTrack(message.guild.id);
+          } else {
+            await message.reply(`🎵 Added **${track.title}** to the queue.`);
+          }
+        } catch (error) {
+          console.error(error);
+          await message.reply('⚠️ I could not play that track. Please use a valid YouTube or Spotify URL.');
+        }
+        break;
+      }
+      case 'queue': {
+        const state = getMusicState(message.guild.id);
+        if (!state.current && !state.queue.length) return message.reply('🎵 The queue is empty.');
+        const lines = [state.current ? `Now playing: ${state.current.title}` : 'Now playing: nothing', ...state.queue.slice(0, 10).map((entry, index) => `${index + 1}. ${entry.title}`)];
+        await message.reply(`🎵 Queue\n${lines.join('\n')}`);
+        break;
+      }
+      case 'skip': {
+        const state = getMusicState(message.guild.id);
+        if (!state.player) return message.reply('🎵 Nothing is playing right now.');
+        state.player.stop();
+        await message.reply('⏭️ Skipped the current track.');
+        break;
+      }
+      case 'pause': {
+        const state = getMusicState(message.guild.id);
+        if (!state.player) return message.reply('🎵 Nothing is playing right now.');
+        state.player.pause();
+        await message.reply('⏸️ Paused the music.');
+        break;
+      }
+      case 'resume': {
+        const state = getMusicState(message.guild.id);
+        if (!state.player) return message.reply('🎵 Nothing is playing right now.');
+        state.player.unpause();
+        await message.reply('▶️ Resumed the music.');
+        break;
+      }
+      case 'stop': {
+        await stopMusic(message.guild.id);
+        await message.reply('🛑 Stopped the music player.');
+        break;
+      }
       case 'prefix': {
         const newPrefix = args[0];
         if (!newPrefix) return message.reply('⚠️ Please provide a prefix.');
@@ -835,13 +1247,8 @@ client.on('interactionCreate', async (interaction) => {
           break;
         case 'help': {
           const guildState = getGuildState(interaction.guild.id);
-          const embed = new EmbedBuilder().setColor('#5865F2').setTitle('🤖 Mega Bot Help').setDescription(`Prefix: ${guildState.prefix}`).addFields(
-            { name: 'Utility', value: 'ping, help, avatar, userinfo, serverinfo' },
-            { name: 'Moderation', value: 'kick, ban, tempban, softban, warn, unwarn, warnings, mute, unmute, purge, slowmode, nick, lock, unlock' },
-            { name: 'Economy & Fun', value: 'balance, daily, weekly, monthly, work, crime, beg, deposit, withdraw, transfer, shop, buy, inventory, coinflip, dice, rps, 8ball' },
-            { name: 'Setup', value: 'setup-welcome, setup-leave, set-auto-role, setup-selfrole, setup-tickets, prefix, setlang, backup, restore, announce, suggest' }
-          );
-          await interaction.reply({ embeds: [embed] });
+          const embed = buildHelpEmbed(guildState.prefix);
+          await interaction.reply({ embeds: [embed], components: buildHelpComponents() });
           break;
         }
         case 'avatar': {
@@ -1211,6 +1618,131 @@ client.on('interactionCreate', async (interaction) => {
           await interaction.reply(`✅ Prefix updated to **${value}**.`);
           break;
         }
+        case 'setlogchannel': {
+          const channel = interaction.options.getChannel('channel');
+          getGuildState(interaction.guild.id).logging.channelId = channel.id;
+          saveState();
+          await interaction.reply(`✅ Logging channel set to ${channel}.`);
+          break;
+        }
+        case 'poll': {
+          const question = interaction.options.getString('question');
+          const options = interaction.options.getString('options').split(',').map((entry) => entry.trim()).filter(Boolean);
+          if (options.length < 2) return interaction.reply({ content: '⚠️ Provide at least two comma-separated options.', ephemeral: true });
+          const pollMessage = await interaction.channel.send({ embeds: [new EmbedBuilder().setColor('#5865F2').setTitle('📊 Poll').setDescription(question).addFields(options.map((option, index) => ({ name: `${index + 1}. ${option}`, value: '⬜', inline: false }))) ] });
+          const emojiList = ['1️⃣', '2️⃣', '3️⃣', '4️⃣', '5️⃣', '6️⃣', '6️⃣', '7️⃣', '8️⃣', '9️⃣'];
+          for (let index = 0; index < Math.min(options.length, emojiList.length); index += 1) {
+            await pollMessage.react(emojiList[index]).catch(() => null);
+          }
+          await interaction.reply('✅ Poll created.');
+          break;
+        }
+        case 'remind': {
+          const duration = parseDuration(interaction.options.getString('time'));
+          const messageText = interaction.options.getString('message');
+          if (!duration || !messageText) return interaction.reply({ content: '⚠️ Use a valid time like 10m, 1h, or 2d.', ephemeral: true });
+          const timeoutId = setTimeout(async () => {
+            try {
+              await interaction.user.send(`⏰ Reminder: ${messageText}`);
+            } catch {}
+            reminders.delete(timeoutId);
+          }, duration);
+          reminders.set(timeoutId, { userId: interaction.user.id, createdAt: Date.now() });
+          await interaction.reply(`✅ Reminder set for ${interaction.options.getString('time')}.`);
+          break;
+        }
+        case 'streamremind': {
+          const platform = interaction.options.getString('platform').toLowerCase();
+          const name = interaction.options.getString('name');
+          const duration = parseDuration(interaction.options.getString('time'));
+          if (!['youtube', 'twitch'].includes(platform) || !name || !duration) return interaction.reply({ content: '⚠️ Use youtube or twitch with a valid time.', ephemeral: true });
+          const timeoutId = setTimeout(async () => {
+            try {
+              await interaction.user.send(`📺 Reminder: ${name} on ${platform} is starting soon.`);
+            } catch {}
+            reminders.delete(timeoutId);
+          }, duration);
+          reminders.set(timeoutId, { userId: interaction.user.id, createdAt: Date.now(), platform, name });
+          await interaction.reply(`✅ Stream reminder set for ${name} on ${platform}.`);
+          break;
+        }
+        case 'addblockword': {
+          const word = interaction.options.getString('word');
+          const guildState = getGuildState(interaction.guild.id);
+          guildState.autoMod.blockedWords = Array.from(new Set([...(guildState.autoMod.blockedWords || []), word.toLowerCase()]));
+          saveState();
+          await interaction.reply(`✅ Added **${word}** to the blocked words list.`);
+          break;
+        }
+        case 'removeblockword': {
+          const word = interaction.options.getString('word');
+          const guildState = getGuildState(interaction.guild.id);
+          guildState.autoMod.blockedWords = (guildState.autoMod.blockedWords || []).filter((entry) => entry.toLowerCase() !== word.toLowerCase());
+          saveState();
+          await interaction.reply(`✅ Removed **${word}** from the blocked words list.`);
+          break;
+        }
+        case 'setup-reactionrole': {
+          const role = interaction.options.getRole('role');
+          const emoji = interaction.options.getString('emoji');
+          const label = interaction.options.getString('label') || role.name;
+          const panelMessage = await interaction.channel.send({ content: `${label}\nReact with ${emoji} to get **${role.name}**.` });
+          await panelMessage.react(emoji).catch(() => null);
+          getGuildState(interaction.guild.id).reactionRoles.push({ messageId: panelMessage.id, channelId: panelMessage.channel.id, roleId: role.id, emoji: getReactionKey(emoji) });
+          saveState();
+          await interaction.reply('✅ Reaction-role panel created.');
+          break;
+        }
+        case 'play': {
+          const url = interaction.options.getString('url');
+          if (!interaction.member.voice?.channel) return interaction.reply({ content: '⚠️ Join a voice channel first.', ephemeral: true });
+          try {
+            const track = await resolveTrackInfo(url);
+            const state = await ensureVoiceConnection(interaction.guild.id, interaction.member.voice.channel, interaction.channel);
+            state.queue.push(track);
+            if (!state.player || state.player.state.status === AudioPlayerStatus.Idle) {
+              await playNextTrack(interaction.guild.id);
+            }
+            await interaction.reply(`🎵 Added **${track.title}** to the queue.`);
+          } catch (error) {
+            console.error(error);
+            await interaction.reply({ content: '⚠️ I could not play that track.', ephemeral: true });
+          }
+          break;
+        }
+        case 'queue': {
+          const state = getMusicState(interaction.guild.id);
+          if (!state.current && !state.queue.length) return interaction.reply('🎵 The queue is empty.');
+          const lines = [state.current ? `Now playing: ${state.current.title}` : 'Now playing: nothing', ...state.queue.slice(0, 10).map((entry, index) => `${index + 1}. ${entry.title}`)];
+          await interaction.reply(`🎵 Queue\n${lines.join('\n')}`);
+          break;
+        }
+        case 'skip': {
+          const state = getMusicState(interaction.guild.id);
+          if (!state.player) return interaction.reply('🎵 Nothing is playing right now.');
+          state.player.stop();
+          await interaction.reply('⏭️ Skipped the current track.');
+          break;
+        }
+        case 'pause': {
+          const state = getMusicState(interaction.guild.id);
+          if (!state.player) return interaction.reply('🎵 Nothing is playing right now.');
+          state.player.pause();
+          await interaction.reply('⏸️ Paused the music.');
+          break;
+        }
+        case 'resume': {
+          const state = getMusicState(interaction.guild.id);
+          if (!state.player) return interaction.reply('🎵 Nothing is playing right now.');
+          state.player.unpause();
+          await interaction.reply('▶️ Resumed the music.');
+          break;
+        }
+        case 'stop': {
+          await stopMusic(interaction.guild.id);
+          await interaction.reply('🛑 Stopped the music player.');
+          break;
+        }
         case 'setlang': {
           const language = interaction.options.getString('language');
           getGuildState(interaction.guild.id).language = language;
@@ -1236,6 +1768,14 @@ client.on('interactionCreate', async (interaction) => {
   }
 
   if (interaction.isButton()) {
+    if (interaction.customId.startsWith('help:')) {
+      const [, category = 'all'] = interaction.customId.split(':');
+      const guildState = getGuildState(interaction.guild.id);
+      const embed = buildHelpEmbed(guildState.prefix, category);
+      await interaction.update({ embeds: [embed], components: buildHelpComponents(category) });
+      return;
+    }
+
     if (interaction.customId === 'open_ticket') {
       const ticketCount = Object.keys(state.tickets || {}).length + 1;
       const ticketChannel = await interaction.guild.channels.create({
