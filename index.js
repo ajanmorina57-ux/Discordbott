@@ -541,11 +541,13 @@ client.on('guildMemberAdd', async (member) => {
     if (role) await member.roles.add(role).catch(() => null);
   }
 
-  const welcomeChannel = guildState.welcome.channelId ? member.guild.channels.cache.get(guildState.welcome.channelId) : member.guild.channels.cache.find((ch) => ch.name.includes('welcome'));
-  if (welcomeChannel?.isTextBased()) {
-    const message = (guildState.welcome.message || 'Welcome {user} to {server}!').replace('{user}', member.user.tag).replace('{server}', member.guild.name);
-    await welcomeChannel.send(message);
-  }
+  try {
+    const welcomeChannel = guildState.welcome.channelId ? member.guild.channels.cache.get(guildState.welcome.channelId) : member.guild.channels.cache.find((ch) => ch.name.includes('welcome'));
+    if (welcomeChannel?.isTextBased()) {
+      const message = (guildState.welcome.message || 'Welcome {user} to {server}!').replace('{user}', member.user.tag).replace('{server}', member.guild.name);
+      await welcomeChannel.send(message).catch(() => null);
+    }
+  } catch {}
 
   await sendLog(member.guild.id, new EmbedBuilder().setColor('#57F287').setTitle('👋 Member Joined').setDescription(`${member.user.tag} joined the server.`));
 });
