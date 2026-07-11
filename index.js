@@ -209,15 +209,16 @@ function formatDuration(ms) {
 
 const cooldowns = new Map();
 const aliases = {
-  ping: ['pong'],
-  help: ['commands', 'cmds'],
-  balance: ['bal'],
-  daily: ['claim'],
-  warn: ['warning'],
-  purge: ['clear'],
-  level: ['rank'],
-  weekly: ['week'],
-  monthly: ['month']
+  pong: 'ping',
+  commands: 'help',
+  cmds: 'help',
+  bal: 'balance',
+  claim: 'daily',
+  warning: 'warn',
+  clear: 'purge',
+  rank: 'level',
+  week: 'weekly',
+  month: 'monthly'
 };
 
 const slashCommands = [
@@ -365,7 +366,7 @@ client.on('messageCreate', async (message) => {
 
   const [rawCommand, ...args] = commandContent.split(/\s+/);
   const commandName = (rawCommand || '').toLowerCase();
-  const resolvedCommand = aliases[commandName] ? aliases[commandName][0] : commandName;
+  const resolvedCommand = aliases[commandName] || commandName;
   if (!resolvedCommand) return;
   if (!useCooldown(message.author.id, resolvedCommand, 3)) {
     return message.reply('⏳ Please wait a moment before using that command again.');
