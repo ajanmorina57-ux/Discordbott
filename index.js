@@ -230,6 +230,27 @@ function canModerate(member) {
     || member.permissions.has(PermissionFlagsBits.ModerateMembers);
 }
 
+async function notifyModerationAction(guild, targetUser, moderator, action, reason) {
+  const owner = await guild.fetchOwner().catch(() => null);
+  const adminIds = new Set([owner?.id].filter(Boolean));
+
+  for (const member of guild.members.cache.values()) {
+    if (member.user.bot) continue;
+    if (member.id === moderator.id) continue;
+    if (member.permissions.has(PermissionFlagsBits.Administrator) || member.permissions.has(PermissionFlagsBits.ModerateMembers)) {
+      adminIds.add(member.id);
+    }
+  }
+
+  const message = `⚠️ ${moderator.tag} used **${action}** on ${targetUser.tag}.\nReason: ${reason}`;
+  for (const userId of adminIds) {
+    const user = await guild.client.users.fetch(userId).catch(() => null);
+    if (user && user.id !== moderator.id) {
+      await user.send(message).catch(() => null);
+    }
+  }
+}
+
 function getMusicState(guildId) {
   if (!musicStates.has(guildId)) {
     musicStates.set(guildId, { queue: [], connection: null, player: null, textChannel: null, current: null });
@@ -419,16 +440,26 @@ function buildHelpComponents(selectedCategory = 'all') {
     { id: 'utility', label: 'Utility', style: ButtonStyle.Secondary },
     { id: 'moderation', label: 'Moderation', style: ButtonStyle.Secondary },
     { id: 'economy', label: 'Economy', style: ButtonStyle.Secondary },
-    { id: 'setup', label: 'Setup', style: ButtonStyle.Secondary },
     { id: 'music', label: 'Music', style: ButtonStyle.Secondary }
   ];
 
-  return [new ActionRowBuilder().addComponents(
-    ...categories.map((category) => new ButtonBuilder()
-      .setCustomId(`help:${category.id}`)
-      .setLabel(category.label)
-      .setStyle(selectedCategory === category.id ? ButtonStyle.Success : category.style))
-  )];
+  const firstRow = categories.slice(0, 5);
+  const secondRow = [{ id: 'setup', label: 'Setup', style: ButtonStyle.Secondary }];
+
+  return [
+    new ActionRowBuilder().addComponents(
+      ...firstRow.map((category) => new ButtonBuilder()
+        .setCustomId(`help:${category.id}`)
+        .setLabel(category.label)
+        .setStyle(selectedCategory === category.id ? ButtonStyle.Success : category.style))
+    ),
+    new ActionRowBuilder().addComponents(
+      ...secondRow.map((category) => new ButtonBuilder()
+        .setCustomId(`help:${category.id}`)
+        .setLabel(category.label)
+        .setStyle(selectedCategory === category.id ? ButtonStyle.Success : category.style))
+    )
+  ];
 }
 
 const cooldowns = new Map();
@@ -938,6 +969,7 @@ client.on('messageCreate', async (message) => {
         userState.warnings.push({ moderator: message.author.id, reason, createdAt: new Date().toISOString() });
         saveState();
         await message.reply(`⚠️ ${target.user.tag} has been warned. Reason: ${reason}`);
+        await notifyModerationAction(message.guild, target.user, message.author, 'warn', reason);
         break;
       }
       case 'unwarn': {
@@ -1495,6 +1527,7 @@ client.on('interactionCreate', async (interaction) => {
           userState.warnings.push({ moderator: interaction.user.id, reason, createdAt: new Date().toISOString() });
           saveState();
           await interaction.reply(`⚠️ ${target.user.tag} was warned. Reason: ${reason}`);
+          await notifyModerationAction(interaction.guild, target.user, interaction.user, 'warn', reason);
           break;
         }
         case 'unwarn': {
