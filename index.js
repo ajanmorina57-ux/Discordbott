@@ -682,17 +682,8 @@ client.on('messageCreate', async (message) => {
         await message.reply(`🏓 Pong! Latency is ${client.ws.ping}ms.`);
         break;
       case 'help': {
-        const embed = new EmbedBuilder()
-          .setColor('#5865F2')
-          .setTitle('🤖 Mega Bot Help')
-          .setDescription(`Prefix: ${prefix}\nFeatures: moderation, economy, leveling, welcome, tickets, self-roles, suggestions, fun, announcements, auto-mod, reaction roles, logging`)
-          .addFields(
-            { name: 'Utility', value: 'ping, help, avatar, userinfo, serverinfo' },
-            { name: 'Moderation', value: 'kick, ban, tempban, softban, warn, unwarn, warnings, mute, unmute, purge, slowmode, nick, lock, unlock' },
-            { name: 'Economy & Fun', value: 'balance, daily, weekly, monthly, work, crime, beg, deposit, withdraw, transfer, shop, buy, inventory, coinflip, dice, rps, 8ball' },
-            { name: 'Setup', value: 'setup-welcome, setup-leave, set-auto-role, setup-selfrole, setup-tickets, prefix, setlogchannel, addblockword, removeblockword, setup-reactionrole, setlang, backup, restore, announce, suggest' }
-          );
-        await message.reply({ embeds: [embed] });
+        const embed = buildHelpEmbed(prefix);
+        await message.reply({ embeds: [embed], components: buildHelpComponents() });
         break;
       }
       case 'avatar': {
