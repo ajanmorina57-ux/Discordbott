@@ -740,6 +740,48 @@ client.on('messageCreate', async (message) => {
         await message.reply('🔓 Channel unlocked.');
         break;
       }
+      case 'setup-welcome': {
+        const channel = message.mentions.channels.first() || message.guild.channels.cache.get(args[0]) || message.guild.channels.cache.find((ch) => ch.name.toLowerCase() === (args[0] || '').toLowerCase());
+        if (!channel?.isTextBased()) return message.reply('⚠️ Please mention or provide a valid text channel.');
+        getGuildState(message.guild.id).welcome.channelId = channel.id;
+        saveState();
+        await message.reply(`✅ Welcome channel set to ${channel}.`);
+        break;
+      }
+      case 'setup-leave': {
+        const channel = message.mentions.channels.first() || message.guild.channels.cache.get(args[0]) || message.guild.channels.cache.find((ch) => ch.name.toLowerCase() === (args[0] || '').toLowerCase());
+        if (!channel?.isTextBased()) return message.reply('⚠️ Please mention or provide a valid text channel.');
+        getGuildState(message.guild.id).leave.channelId = channel.id;
+        saveState();
+        await message.reply(`✅ Leave channel set to ${channel}.`);
+        break;
+      }
+      case 'set-auto-role': {
+        const role = message.mentions.roles.first() || message.guild.roles.cache.get(args[0]) || message.guild.roles.cache.find((entry) => entry.name.toLowerCase() === (args[0] || '').toLowerCase());
+        if (!role) return message.reply('⚠️ Please mention or provide a valid role.');
+        getGuildState(message.guild.id).autoRoleId = role.id;
+        saveState();
+        await message.reply(`✅ Auto-role set to ${role}.`);
+        break;
+      }
+      case 'setup-selfrole': {
+        const role = message.mentions.roles.first() || message.guild.roles.cache.get(args[0]) || message.guild.roles.cache.find((entry) => entry.name.toLowerCase() === (args[0] || '').toLowerCase());
+        const label = args.slice(1).join(' ') || 'Claim role';
+        if (!role) return message.reply('⚠️ Please mention or provide a valid role.');
+        const row = new ActionRowBuilder().addComponents(
+          new ButtonBuilder().setCustomId(`selfrole:${role.id}`).setLabel(label).setStyle(ButtonStyle.Primary)
+        );
+        await message.reply('✅ Self-role panel created.');
+        await message.channel.send({ content: `Click below to toggle **${role.name}**`, components: [row] });
+        break;
+      }
+      case 'setup-tickets': {
+        const embed = new EmbedBuilder().setColor('#FF5555').setTitle('🎫 Help & Support Tickets').setDescription('Click the button below to open a private support room.');
+        const row = new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('open_ticket').setLabel('Create Ticket').setStyle(ButtonStyle.Danger).setEmoji('📩'));
+        await message.reply('✅ Ticket panel created.');
+        await message.channel.send({ embeds: [embed], components: [row] });
+        break;
+      }
       case 'prefix': {
         const newPrefix = args[0];
         if (!newPrefix) return message.reply('⚠️ Please provide a prefix.');
