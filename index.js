@@ -62,6 +62,7 @@ const client = new Client({
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMembers,
     GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.GuildVoiceStates,
     GatewayIntentBits.GuildMessageReactions,
     GatewayIntentBits.MessageContent
   ]
@@ -249,6 +250,12 @@ async function notifyModerationAction(guild, targetUser, moderator, action, reas
       await user.send(message).catch(() => null);
     }
   }
+}
+
+async function sendWarningDM(targetUser, guild, moderator, reason) {
+  if (!targetUser || !guild || !moderator) return;
+  const message = `⚠️ You were warned in ${guild.name} by ${moderator.tag}.\nReason: ${reason}`;
+  await targetUser.send(message).catch(() => null);
 }
 
 function getMusicState(guildId) {
@@ -969,6 +976,7 @@ client.on('messageCreate', async (message) => {
         userState.warnings.push({ moderator: message.author.id, reason, createdAt: new Date().toISOString() });
         saveState();
         await message.reply(`⚠️ ${target.user.tag} has been warned. Reason: ${reason}`);
+        await sendWarningDM(target.user, message.guild, message.author, reason);
         await notifyModerationAction(message.guild, target.user, message.author, 'warn', reason);
         break;
       }
@@ -997,16 +1005,26 @@ client.on('messageCreate', async (message) => {
         const minutes = Number.parseInt(args[1], 10);
         if (!target || !minutes) return message.reply('⚠️ Use: >mute @user minutes');
         const reason = args.slice(2).join(' ') || 'No reason provided';
-        await target.timeout(minutes * 60 * 1000, reason);
-        await message.reply(`⏱️ ${target.user.tag} was timed out for ${minutes} minutes.`);
+        try {
+          await target.timeout(minutes * 60 * 1000, reason);
+          await message.reply(`⏱️ ${target.user.tag} was timed out for ${minutes} minutes.`);
+        } catch (error) {
+          console.error('Mute failed:', error);
+          await message.reply('❌ I could not timeout that user. Check my permissions and role position.');
+        }
         break;
       }
       case 'unmute': {
         if (!canModerate(message.member)) return message.reply('❌ You do not have permission to use this command.');
         const target = message.mentions.members?.first();
         if (!target) return message.reply('⚠️ Please mention a user to unmute.');
-        await target.timeout(null);
-        await message.reply(`✅ ${target.user.tag} was untimed out.`);
+        try {
+          await target.timeout(null);
+          await message.reply(`✅ ${target.user.tag} was untimed out.`);
+        } catch (error) {
+          console.error('Unmute failed:', error);
+          await message.reply('❌ I could not remove the timeout. Check my permissions and role position.');
+        }
         break;
       }
       case 'purge': {
@@ -1527,6 +1545,7 @@ client.on('interactionCreate', async (interaction) => {
           userState.warnings.push({ moderator: interaction.user.id, reason, createdAt: new Date().toISOString() });
           saveState();
           await interaction.reply(`⚠️ ${target.user.tag} was warned. Reason: ${reason}`);
+          await sendWarningDM(target.user, interaction.guild, interaction.user, reason);
           await notifyModerationAction(interaction.guild, target.user, interaction.user, 'warn', reason);
           break;
         }
@@ -1553,15 +1572,25 @@ client.on('interactionCreate', async (interaction) => {
           const minutes = interaction.options.getInteger('minutes');
           const reason = interaction.options.getString('reason') || 'No reason provided';
           if (!target || !minutes) return interaction.reply({ content: '⚠️ Please provide a valid target and duration.', ephemeral: true });
-          await target.timeout(minutes * 60 * 1000, reason);
-          await interaction.reply(`⏱️ ${target.user.tag} was timed out for ${minutes} minutes.`);
+          try {
+            await target.timeout(minutes * 60 * 1000, reason);
+            await interaction.reply(`⏱️ ${target.user.tag} was timed out for ${minutes} minutes.`);
+          } catch (error) {
+            console.error('Mute failed:', error);
+            await interaction.reply({ content: '❌ I could not timeout that user. Check my permissions and role position.', ephemeral: true });
+          }
           break;
         }
         case 'unmute': {
           if (!canModerate(interaction.member)) return interaction.reply({ content: '❌ You do not have permission to use this command.', ephemeral: true });
           const target = interaction.options.getMember('target');
-          await target.timeout(null);
-          await interaction.reply(`✅ ${target.user.tag} was untimed out.`);
+          try {
+            await target.timeout(null);
+            await interaction.reply(`✅ ${target.user.tag} was untimed out.`);
+          } catch (error) {
+            console.error('Unmute failed:', error);
+            await interaction.reply({ content: '❌ I could not remove the timeout. Check my permissions and role position.', ephemeral: true });
+          }
           break;
         }
         case 'purge': {
