@@ -30,6 +30,23 @@ const GUILD_ID = process.env.GUILD_ID;
 const DATA_FILE = path.resolve('./data.json');
 const BACKUP_DIR = path.resolve('./backups');
 
+function validateConfig() {
+  const placeholders = [];
+  if (!TOKEN || TOKEN.includes('your_bot_token_here')) placeholders.push('TOKEN');
+  if (!CLIENT_ID || CLIENT_ID.includes('your_client_id_here')) placeholders.push('CLIENT_ID');
+  if (GUILD_ID && GUILD_ID.includes('your_server_id_here')) placeholders.push('GUILD_ID');
+
+  if (placeholders.length) {
+    console.error(`⚠️ Missing or placeholder config values: ${placeholders.join(', ')}.`);
+    console.error('Update your .env file with real Discord credentials before starting the bot.');
+    return false;
+  }
+
+  return true;
+}
+
+const configReady = validateConfig();
+
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
@@ -224,8 +241,8 @@ const aliases = {
 const slashCommands = [
   new SlashCommandBuilder().setName('ping').setDescription('Replies with bot latency'),
   new SlashCommandBuilder().setName('help').setDescription('Shows the bot help menu'),
-  new SlashCommandBuilder().setName('avatar').setDescription('Shows a user avatar'),
-  new SlashCommandBuilder().setName('userinfo').setDescription('Shows a user profile'),
+  new SlashCommandBuilder().setName('avatar').setDescription('Shows a user avatar').addUserOption((opt) => opt.setName('target').setDescription('The user whose avatar you want to see')),
+  new SlashCommandBuilder().setName('userinfo').setDescription('Shows a user profile').addUserOption((opt) => opt.setName('target').setDescription('The user whose profile you want to inspect')),
   new SlashCommandBuilder().setName('serverinfo').setDescription('Shows server information'),
   new SlashCommandBuilder().setName('balance').setDescription('Shows your economy balance'),
   new SlashCommandBuilder().setName('daily').setDescription('Claims your daily reward'),
@@ -356,7 +373,11 @@ client.on('messageCreate', async (message) => {
   }
 
   const prefix = getPrefix(message.guild.id);
-  if (!message.content.startsWith(prefix)) {
+  const normalizedPrefix = prefix.toLowerCase();
+  const normalizedContent = message.content.toLowerCase();
+  const hasPrefix = normalizedContent.startsWith(normalizedPrefix);
+
+  if (!hasPrefix) {
     addXp(message.member, 10);
     return;
   }
@@ -1222,4 +1243,11 @@ client.on('interactionCreate', async (interaction) => {
   }
 });
 
-client.login(TOKEN);
+if (!configReady) {
+  process.exit(1);
+}
+
+client.login(TOKEN).catch((error) => {
+  console.error('❌ Failed to connect to Discord.', error);
+  process.exit(1);
+});
