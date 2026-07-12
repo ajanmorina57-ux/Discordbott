@@ -231,6 +231,66 @@ function canModerate(member) {
     || member.permissions.has(PermissionFlagsBits.ModerateMembers);
 }
 
+function createProgressBar(progress, length = 12) {
+  const filled = Math.round((progress / 100) * length);
+  const empty = Math.max(0, length - filled);
+  return '█'.repeat(filled) + '░'.repeat(empty);
+}
+
+function getUserRank(userId) {
+  const rankedUsers = Object.entries(state.users)
+    .sort((a, b) => {
+      const levelDifference = (b[1].level || 0) - (a[1].level || 0);
+      if (levelDifference !== 0) return levelDifference;
+      return (b[1].xp || 0) - (a[1].xp || 0);
+    });
+  const index = rankedUsers.findIndex(([id]) => id === userId);
+  return index >= 0 ? index + 1 : 'N/A';
+}
+
+function buildRankEmbed(user, member, userState, rank) {
+  const nextLevelXp = (userState.level + 1) * 100;
+  const progress = Math.max(0, Math.min(100, Math.floor(((userState.xp || 0) / Math.max(1, nextLevelXp)) * 100)));
+  const bar = createProgressBar(progress);
+
+  return new EmbedBuilder()
+    .setColor('#FF73FA')
+    .setTitle(`⭐ ${member?.displayName || user.username}'s Rank`)
+    .setThumbnail(user.displayAvatarURL({ size: 256 }))
+    .setDescription(`Level ${userState.level} • ${userState.xp} XP`)
+    .addFields(
+      { name: 'Rank', value: `#${rank}`, inline: true },
+      { name: 'Next Level', value: `${nextLevelXp - (userState.xp || 0)} XP`, inline: true },
+      { name: 'Warnings', value: `${(userState.warnings || []).length}`, inline: true },
+      { name: 'Progress', value: `${bar} ${progress}%`, inline: false }
+    );
+}
+
+async function punishForWarnings(target, guild, moderator, reason) {
+  const userState = getUserState(target.id);
+  const warningCount = userState.warnings.length;
+
+  if (warningCount === 3) {
+    await target.timeout(10 * 60 * 1000, `3 warnings: ${reason}`).catch(() => null);
+    await target.send(`⚠️ You were muted in ${guild.name} after 3 warnings.\nReason: ${reason}`).catch(() => null);
+    return 'muted';
+  }
+
+  if (warningCount === 4) {
+    await target.timeout(24 * 60 * 60 * 1000, `4 warnings: ${reason}`).catch(() => null);
+    await target.send(`⚠️ You were suspended in ${guild.name} after 4 warnings.\nReason: ${reason}`).catch(() => null);
+    return 'suspended';
+  }
+
+  if (warningCount >= 5) {
+    await target.ban({ reason: `5 warnings: ${reason}` }).catch(() => null);
+    await target.send(`⚠️ You were banned from ${guild.name} after 5 warnings.\nReason: ${reason}`).catch(() => null);
+    return 'banned';
+  }
+
+  return null;
+}
+
 async function purgeMessages(channel, amount, sourceMessage = null) {
   if (!channel?.isTextBased()) throw new Error('Invalid channel.');
 
@@ -689,6 +749,12 @@ client.on('messageCreate', async (message) => {
   const matchedBlockedWord = blockedWords.find((word) => new RegExp(`\\b${escapeRegExp(word)}\\b`, 'i').test(content));
   if (matchedBlockedWord && !isModerator) {
     await message.delete().catch(() => null);
+    const userState = getUserState(message.author.id);
+    userState.warnings.push({ moderator: message.client.user.id, reason: `Blocked word: ${matchedBlockedWord}`, createdAt: new Date().toISOString() });
+    saveState();
+    await sendWarningDM(message.author, message.guild, message.client.user, `Blocked word: ${matchedBlockedWord}`);
+    await notifyModerationAction(message.guild, message.author, message.client.user, 'warn', `Blocked word: ${matchedBlockedWord}`);
+    await punishForWarnings(message.member, message.guild, message.client.user, `Blocked word: ${matchedBlockedWord}`);
     return;
   }
 
@@ -915,7 +981,9 @@ client.on('messageCreate', async (message) => {
       }
       case 'level': {
         const userState = getUserState(message.author.id);
-        await message.reply(`📈 You are level **${userState.level}** with **${userState.xp}** XP.`);
+        const rank = getUserRank(message.author.id);
+        const embed = buildRankEmbed(message.author, message.member, userState, rank);
+        await message.reply({ embeds: [embed] });
         break;
       }
       case 'leaderboard': {
@@ -1014,6 +1082,7 @@ client.on('messageCreate', async (message) => {
         await message.reply(`⚠️ ${target.user.tag} has been warned. Reason: ${reason}`);
         await sendWarningDM(target.user, message.guild, message.author, reason);
         await notifyModerationAction(message.guild, target.user, message.author, 'warn', reason);
+        await punishForWarnings(target, message.guild, message.author, reason);
         break;
       }
       case 'unwarn': {
@@ -1512,7 +1581,9 @@ client.on('interactionCreate', async (interaction) => {
         }
         case 'level': {
           const userState = getUserState(interaction.user.id);
-          await interaction.reply(`📈 You are level **${userState.level}** with **${userState.xp}** XP.`);
+          const rank = getUserRank(interaction.user.id);
+          const embed = buildRankEmbed(interaction.user, interaction.member, userState, rank);
+          await interaction.reply({ embeds: [embed] });
           break;
         }
         case 'leaderboard': {
@@ -1609,6 +1680,7 @@ client.on('interactionCreate', async (interaction) => {
           await interaction.reply(`⚠️ ${target.user.tag} was warned. Reason: ${reason}`);
           await sendWarningDM(target.user, interaction.guild, interaction.user, reason);
           await notifyModerationAction(interaction.guild, target.user, interaction.user, 'warn', reason);
+          await punishForWarnings(target, interaction.guild, interaction.user, reason);
           break;
         }
         case 'unwarn': {
