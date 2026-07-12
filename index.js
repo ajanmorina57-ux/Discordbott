@@ -694,8 +694,18 @@ client.on('guildMemberAdd', async (member) => {
   try {
     const welcomeChannel = guildState.welcome.channelId ? member.guild.channels.cache.get(guildState.welcome.channelId) : member.guild.channels.cache.find((ch) => ch.name.includes('welcome'));
     if (welcomeChannel?.isTextBased()) {
-      const message = (guildState.welcome.message || 'Welcome {user} to {server}!').replace('{user}', member.user.tag).replace('{server}', member.guild.name);
-      await welcomeChannel.send(message).catch(() => null);
+      const baseMessage = (guildState.welcome.message || 'Welcome {user} to {server}!').replace('{user}', member.user.tag).replace('{server}', member.guild.name);
+      const welcomeEmbed = new EmbedBuilder()
+        .setColor('#57F287')
+        .setTitle('👋 Welcome aboard!')
+        .setDescription(baseMessage)
+        .setThumbnail(member.user.displayAvatarURL({ size: 256 }))
+        .addFields(
+          { name: 'Member', value: member.user.tag, inline: true },
+          { name: 'Joined', value: `<t:${Math.floor(Date.now() / 1000)}:R>`, inline: true }
+        )
+        .setFooter({ text: `We’re glad to have you, ${member.user.username}!` });
+      await welcomeChannel.send({ embeds: [welcomeEmbed] }).catch(() => null);
     }
   } catch {}
 
@@ -764,13 +774,23 @@ client.on('messageCreate', async (message) => {
   const blockedWords = guildState.autoMod.blockedWords || [];
   const matchedBlockedWord = blockedWords.find((word) => new RegExp(`\\b${escapeRegExp(word)}\\b`, 'i').test(content));
   if (matchedBlockedWord && !isModerator) {
-    await message.delete().catch(() => null);
-    const userState = getUserState(message.author.id);
-    userState.warnings.push({ moderator: message.client.user.id, reason: `Blocked word: ${matchedBlockedWord}`, createdAt: new Date().toISOString() });
-    saveState();
-    await sendWarningDM(message.author, message.guild, message.client.user, `Blocked word: ${matchedBlockedWord}`);
-    await notifyModerationAction(message.guild, message.author, message.client.user, 'warn', `Blocked word: ${matchedBlockedWord}`);
-    await punishForWarnings(message.member, message.guild, message.client.user, `Blocked word: ${matchedBlockedWord}`);
+    try {
+      await message.delete().catch(() => null);
+      const userState = getUserState(message.author.id);
+      userState.warnings.push({ moderator: message.client.user.id, reason: `Blocked word: ${matchedBlockedWord}`, createdAt: new Date().toISOString() });
+      saveState();
+      await sendWarningDM(message.author, message.guild, message.client.user, `Blocked word: ${matchedBlockedWord}`);
+      await notifyModerationAction(message.guild, message.author, message.client.user, 'warn', `Blocked word: ${matchedBlockedWord}`);
+      await punishForWarnings(message.member, message.guild, message.client.user, `Blocked word: ${matchedBlockedWord}`);
+      await stopMusic(message.guild.id).catch(() => null);
+      const warningEmbed = new EmbedBuilder()
+        .setColor('#ED4245')
+        .setTitle('🚫 Bad word detected')
+        .setDescription(`${message.author.tag} said a blocked word and the message was removed.`)
+        .addFields({ name: 'Blocked word', value: matchedBlockedWord, inline: true })
+        .setTimestamp();
+      await message.channel.send({ embeds: [warningEmbed] }).catch(() => null);
+    } catch {}
     return;
   }
 
