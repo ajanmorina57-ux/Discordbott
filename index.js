@@ -427,7 +427,7 @@ function buildHelpEmbed(prefix, category = 'all') {
     case 'economy':
       return base.addFields({ name: 'Economy & Fun', value: 'balance, daily, weekly, monthly, work, crime, beg, deposit, withdraw, transfer, shop, buy, inventory, coinflip, dice, rps, 8ball' });
     case 'setup':
-      return base.addFields({ name: 'Setup', value: 'setup-welcome, setup-leave, set-auto-role, setup-selfrole, giverole, setup-tickets, prefix, setlogchannel, addblockword, removeblockword, setup-reactionrole, setlang, backup, restore, announce, suggest, poll, remind, streamremind' });
+      return base.addFields({ name: 'Setup', value: 'setup-welcome, setup-leave, set-auto-role, setup-selfrole, giverole, deleteallchannels, setup-tickets, prefix, setlogchannel, addblockword, removeblockword, setup-reactionrole, setlang, backup, restore, announce, suggest, poll, remind, streamremind' });
     case 'music':
       return base.addFields({ name: 'Music', value: 'play, queue, skip, pause, resume, stop' });
     default:
@@ -435,7 +435,7 @@ function buildHelpEmbed(prefix, category = 'all') {
         { name: 'Utility', value: 'ping, help, avatar, userinfo, serverinfo' },
         { name: 'Moderation', value: 'kick, ban, tempban, softban, warn, unwarn, warnings, mute, unmute, purge, slowmode, nick, lock, unlock' },
         { name: 'Economy & Fun', value: 'balance, daily, weekly, monthly, work, crime, beg, deposit, withdraw, transfer, shop, buy, inventory, coinflip, dice, rps, 8ball' },
-        { name: 'Setup', value: 'setup-welcome, setup-leave, set-auto-role, setup-selfrole, giverole, setup-tickets, prefix, setlogchannel, addblockword, removeblockword, setup-reactionrole, setlang, backup, restore, announce, suggest, poll, remind, streamremind' },
+        { name: 'Setup', value: 'setup-welcome, setup-leave, set-auto-role, setup-selfrole, giverole, deleteallchannels, setup-tickets, prefix, setlogchannel, addblockword, removeblockword, setup-reactionrole, setlang, backup, restore, announce, suggest, poll, remind, streamremind' },
         { name: 'Music', value: 'play, queue, skip, pause, resume, stop' }
       );
   }
@@ -531,6 +531,7 @@ const slashCommands = [
   new SlashCommandBuilder().setName('set-auto-role').setDescription('Set the auto-role').addRoleOption((opt) => opt.setName('role').setDescription('The role to assign on join').setRequired(true)).setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
   new SlashCommandBuilder().setName('setup-selfrole').setDescription('Create a self-role button').addRoleOption((opt) => opt.setName('role').setDescription('The role to toggle').setRequired(true)).addStringOption((opt) => opt.setName('label').setDescription('Button label').setRequired(true)).setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
   new SlashCommandBuilder().setName('giverole').setDescription('Give a role to a member').addUserOption((opt) => opt.setName('target').setDescription('The member to receive the role').setRequired(true)).addRoleOption((opt) => opt.setName('role').setDescription('The role to assign').setRequired(true)).setDefaultMemberPermissions(PermissionFlagsBits.ManageRoles),
+  new SlashCommandBuilder().setName('deleteallchannels').setDescription('Delete every channel in the server').addStringOption((opt) => opt.setName('confirmation').setDescription('Type DELETE ALL to confirm').setRequired(true)).setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
   new SlashCommandBuilder().setName('setup-tickets').setDescription('Deploy a ticket support panel').setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
   new SlashCommandBuilder().setName('prefix').setDescription('Set a custom prefix for this server').addStringOption((opt) => opt.setName('value').setDescription('The new prefix').setRequired(true)).setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
   new SlashCommandBuilder().setName('setlogchannel').setDescription('Set the logging channel').addChannelOption((opt) => opt.setName('channel').setDescription('Channel for bot logs').setRequired(true)).setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
@@ -1098,6 +1099,16 @@ client.on('messageCreate', async (message) => {
         if (target.roles.cache.has(role.id)) return message.reply(`✅ ${target.user.tag} already has ${role.name}.`);
         await target.roles.add(role).catch(() => null);
         await message.reply(`✅ Gave **${role.name}** to ${target.user.tag}.`);
+        break;
+      }
+      case 'deleteallchannels': {
+        if (!message.member.permissions.has(PermissionFlagsBits.Administrator)) return message.reply('❌ You do not have permission to use this command.');
+        if ((args[0] || '').toUpperCase() !== 'CONFIRM') return message.reply('⚠️ Use >deleteallchannels confirm to delete all channels except this one.');
+        const channels = message.guild.channels.cache.filter((channel) => channel.deletable && channel.id !== message.channel.id);
+        for (const channel of channels.values()) {
+          await channel.delete().catch(() => null);
+        }
+        await message.reply('🗑️ Channel cleanup started.');
         break;
       }
       case 'setup-selfrole': {
@@ -1670,6 +1681,17 @@ client.on('interactionCreate', async (interaction) => {
           if (target.roles.cache.has(role.id)) return interaction.reply({ content: `✅ ${target.user.tag} already has ${role.name}.`, ephemeral: true });
           await target.roles.add(role).catch(() => null);
           await interaction.reply(`✅ Gave **${role.name}** to ${target.user.tag}.`);
+          break;
+        }
+        case 'deleteallchannels': {
+          if (!interaction.member.permissions.has(PermissionFlagsBits.Administrator)) return interaction.reply({ content: '❌ You do not have permission to use this command.', ephemeral: true });
+          const confirmation = interaction.options.getString('confirmation');
+          if ((confirmation || '').toUpperCase() !== 'DELETE ALL') return interaction.reply({ content: '⚠️ Type DELETE ALL to confirm.', ephemeral: true });
+          const channels = interaction.guild.channels.cache.filter((channel) => channel.deletable && channel.id !== interaction.channel.id);
+          for (const channel of channels.values()) {
+            await channel.delete().catch(() => null);
+          }
+          await interaction.reply('🗑️ Channel cleanup started.');
           break;
         }
         case 'setup-selfrole': {
