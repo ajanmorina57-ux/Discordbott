@@ -337,19 +337,35 @@ async function notifyModerationAction(guild, targetUser, moderator, action, reas
     }
   }
 
-  const message = `⚠️ ${moderator.tag} used **${action}** on ${targetUser.tag}.\nReason: ${reason}`;
+  const embed = new EmbedBuilder()
+    .setColor('#FEE75C')
+    .setTitle('⚠️ Moderation Notice')
+    .setDescription(`${moderator.tag} used **${action}** on ${targetUser.tag}.`)
+    .addFields({ name: 'Reason', value: reason || 'No reason provided' })
+    .setTimestamp();
+
   for (const userId of adminIds) {
     const user = await guild.client.users.fetch(userId).catch(() => null);
     if (user && user.id !== moderator.id) {
-      await user.send(message).catch(() => null);
+      await user.send({ embeds: [embed] }).catch(() => null);
     }
   }
 }
 
 async function sendWarningDM(targetUser, guild, moderator, reason) {
   if (!targetUser || !guild || !moderator) return;
-  const message = `⚠️ You were warned in ${guild.name} by ${moderator.tag}.\nReason: ${reason}`;
-  await targetUser.send(message).catch(() => null);
+  const embed = new EmbedBuilder()
+    .setColor('#ED4245')
+    .setTitle('⚠️ You were warned')
+    .setDescription(`You received a warning in **${guild.name}**.`)
+    .addFields(
+      { name: 'Moderator', value: moderator.tag, inline: true },
+      { name: 'Reason', value: reason || 'No reason provided', inline: true }
+    )
+    .setFooter({ text: 'Please follow the server rules to avoid further action.' })
+    .setTimestamp();
+
+  await targetUser.send({ embeds: [embed] }).catch(() => null);
 }
 
 function getMusicState(guildId) {
@@ -1079,7 +1095,16 @@ client.on('messageCreate', async (message) => {
         const userState = getUserState(target.id);
         userState.warnings.push({ moderator: message.author.id, reason, createdAt: new Date().toISOString() });
         saveState();
-        await message.reply(`⚠️ ${target.user.tag} has been warned. Reason: ${reason}`);
+        const warningEmbed = new EmbedBuilder()
+          .setColor('#FEE75C')
+          .setTitle('⚠️ Warning issued')
+          .setDescription(`${target.user.tag} has been warned.`)
+          .addFields(
+            { name: 'Moderator', value: message.author.tag, inline: true },
+            { name: 'Reason', value: reason || 'No reason provided', inline: true }
+          )
+          .setTimestamp();
+        await message.reply({ embeds: [warningEmbed] });
         await sendWarningDM(target.user, message.guild, message.author, reason);
         await notifyModerationAction(message.guild, target.user, message.author, 'warn', reason);
         await punishForWarnings(target, message.guild, message.author, reason);
@@ -1677,7 +1702,16 @@ client.on('interactionCreate', async (interaction) => {
           const userState = getUserState(target.id);
           userState.warnings.push({ moderator: interaction.user.id, reason, createdAt: new Date().toISOString() });
           saveState();
-          await interaction.reply(`⚠️ ${target.user.tag} was warned. Reason: ${reason}`);
+          const warningEmbed = new EmbedBuilder()
+            .setColor('#FEE75C')
+            .setTitle('⚠️ Warning issued')
+            .setDescription(`${target.user.tag} has been warned.`)
+            .addFields(
+              { name: 'Moderator', value: interaction.user.tag, inline: true },
+              { name: 'Reason', value: reason || 'No reason provided', inline: true }
+            )
+            .setTimestamp();
+          await interaction.reply({ embeds: [warningEmbed] });
           await sendWarningDM(target.user, interaction.guild, interaction.user, reason);
           await notifyModerationAction(interaction.guild, target.user, interaction.user, 'warn', reason);
           await punishForWarnings(target, interaction.guild, interaction.user, reason);
