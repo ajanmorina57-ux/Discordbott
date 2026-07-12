@@ -231,6 +231,40 @@ function canModerate(member) {
     || member.permissions.has(PermissionFlagsBits.ModerateMembers);
 }
 
+async function purgeMessages(channel, amount, sourceMessage = null) {
+  if (!channel?.isTextBased()) throw new Error('Invalid channel.');
+
+  const permissions = channel.permissionsFor(channel.guild.members.me);
+  if (!permissions?.has(PermissionFlagsBits.ManageMessages)) {
+    throw new Error('I need the Manage Messages permission in this channel.');
+  }
+
+  const requestedAmount = Math.min(Math.max(Number.parseInt(amount, 10) || 0, 1), 100);
+  const fetched = await channel.messages.fetch({ limit: requestedAmount + 1 });
+  const deletableMessages = [...fetched.values()]
+    .filter((message) => message.deletable && message.id !== sourceMessage?.id)
+    .slice(0, requestedAmount);
+
+  if (!deletableMessages.length) {
+    if (sourceMessage?.deletable) {
+      await sourceMessage.delete().catch(() => null);
+    }
+    return 0;
+  }
+
+  try {
+    const deleted = await channel.bulkDelete(deletableMessages.map((message) => message.id), true);
+    return deleted.size;
+  } catch (error) {
+    let deleted = 0;
+    for (const message of deletableMessages) {
+      await message.delete().catch(() => null);
+      deleted += 1;
+    }
+    return deleted;
+  }
+}
+
 async function notifyModerationAction(guild, targetUser, moderator, action, reason) {
   const owner = await guild.fetchOwner().catch(() => null);
   const adminIds = new Set([owner?.id].filter(Boolean));
@@ -1033,8 +1067,13 @@ client.on('messageCreate', async (message) => {
         if (!canModerate(message.member)) return message.reply('❌ You do not have permission to use this command.');
         const amount = Number.parseInt(args[0], 10);
         if (!amount || amount < 1 || amount > 100) return message.reply('⚠️ Use a number between 1 and 100.');
-        const deleted = await message.channel.bulkDelete(amount, true);
-        await message.reply(`🧹 Deleted ${deleted.size} messages.`);
+        try {
+          const deleted = await purgeMessages(message.channel, amount, message);
+          await message.reply(`🧹 Deleted ${deleted} messages.`);
+        } catch (error) {
+          console.error('Purge failed:', error);
+          await message.reply(`❌ ${error.message}`);
+        }
         break;
       }
       case 'slowmode': {
@@ -1620,8 +1659,13 @@ client.on('interactionCreate', async (interaction) => {
           if (!canModerate(interaction.member)) return interaction.reply({ content: '❌ You do not have permission to use this command.', ephemeral: true });
           const amount = interaction.options.getInteger('amount');
           if (!amount || amount < 1 || amount > 100) return interaction.reply({ content: '⚠️ Use a value between 1 and 100.', ephemeral: true });
-          await interaction.channel.bulkDelete(amount, true);
-          await interaction.reply({ content: `🧹 Deleted ${amount} messages.`, ephemeral: true });
+          try {
+            const deleted = await purgeMessages(interaction.channel, amount, interaction.message);
+            await interaction.reply({ content: `🧹 Deleted ${deleted} messages.`, ephemeral: true });
+          } catch (error) {
+            console.error('Purge failed:', error);
+            await interaction.reply({ content: `❌ ${error.message}`, ephemeral: true });
+          }
           break;
         }
         case 'slowmode': {
